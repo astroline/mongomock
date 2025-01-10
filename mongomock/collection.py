@@ -620,6 +620,13 @@ class Collection:
         if not all(isinstance(k, str) for k in data):
             raise ValueError('Document keys must be strings')
 
+        # Like pymongo, we should fill the _id in the inserted dict (odd behavior,
+        # but we need to stick to it), so we must patch in-place the data dict
+        if '_id' not in data:
+            data['_id'] = ObjectId()
+
+        data = helpers.patch_datetime_awareness_in_document(data, copy_values=True)
+
         if BSON:
             # bson validation
             check_keys = version.parse('3.6') > helpers.PYMONGO_VERSION
@@ -628,18 +635,11 @@ class Collection:
 
             _bson_encode(data, check_keys=check_keys, codec_options=self._codec_options)
 
-        # Like pymongo, we should fill the _id in the inserted dict (odd behavior,
-        # but we need to stick to it), so we must patch in-place the data dict
-        if '_id' not in data:
-            data['_id'] = ObjectId()
-
         object_id = data['_id']
         if isinstance(object_id, Mapping):
             object_id = helpers.hashdict(object_id)
         if object_id in self._store:
             raise DuplicateKeyError('E11000 Duplicate Key Error', 11000)
-
-        data = helpers.patch_datetime_awareness_in_document(data)
 
         self._store[object_id] = data
         try:

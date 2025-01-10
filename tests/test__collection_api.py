@@ -25,6 +25,7 @@ from tests.diff import diff
 
 try:
     import pymongo
+    from bson import Code
     from bson import codec_options
     from bson import DBRef
     from bson import decimal128
@@ -375,6 +376,76 @@ class CollectionAPITest(TestCase):
         document = {'a': 1}
         result = self.db.collection.insert_one(document)
         self.assert_document_stored(result.inserted_id, document)
+
+    def test__insert_one_accepts_user_dict_and_detaches_nested_values(self):
+        aware_datetime = datetime(2020, 1, 1, 12, tzinfo=UTCPlus2())
+        nested = collections.UserDict({'values': [1], 'when': aware_datetime})
+        document = collections.UserDict({'nested': nested})
+
+        result = self.db.collection.insert_one(document)
+        nested['values'].append(2)
+        nested['when'] = datetime(2021, 1, 1)
+
+        stored = self.db.collection.find_one(result.inserted_id)
+        self.assertEqual([1], stored['nested']['values'])
+        self.assertEqual(datetime(2020, 1, 1, 10), stored['nested']['when'])
+        self.assertIsInstance(stored, dict)
+        self.assertIsInstance(stored['nested'], dict)
+
+    @skipIf(not helpers.HAVE_PYMONGO, 'pymongo not installed')
+    def test__insert_one_detaches_mutable_bson_leaf(self):
+        code = Code('return value', {'value': 1})
+
+        result = self.db.collection.insert_one({'code': code})
+        code.scope['value'] = 2
+
+        stored = self.db.collection.find_one(result.inserted_id)
+        self.assertEqual({'value': 1}, stored['code'].scope)
+
+    @skipIf(not helpers.HAVE_PYMONGO, 'pymongo not installed')
+    def test__datetime_patch_does_not_preserve_mutable_leaf_aliases(self):
+        code = Code('return value', {'values': []})
+
+        patched = helpers.patch_datetime_awareness_in_document([code, code], copy_values=True)
+        patched[0].scope['values'].append(1)
+
+        self.assertIsNot(patched[0], patched[1])
+        self.assertEqual([], patched[1].scope['values'])
+
+    def test__datetime_patch_reuses_immutable_bson_leaves(self):
+        values = [
+            helpers.ObjectId(),
+            re.compile('value'),
+            uuid.UUID(int=1),
+        ]
+        if helpers.HAVE_PYMONGO:
+            values.extend(
+                [
+                    helpers.Binary(b'value'),
+                    helpers.Decimal128('1'),
+                    helpers.Int64(1),
+                    helpers.MaxKey(),
+                    helpers.MinKey(),
+                    helpers.Timestamp(1, 1),
+                ]
+            )
+
+        with mock.patch.object(helpers.copy, 'deepcopy', wraps=copy.deepcopy) as deepcopy:
+            patched = helpers.patch_datetime_awareness_in_document(values, copy_values=True)
+
+        self.assertFalse(deepcopy.called)
+        for original, copied in zip(values, patched):
+            self.assertIs(original, copied)
+
+    def test__insert_one_does_not_preserve_container_aliases(self):
+        shared = []
+        result = self.db.collection.insert_one({'first': shared, 'second': shared})
+
+        self.db.collection.update_one({'_id': result.inserted_id}, {'$push': {'first': 1}})
+
+        stored = self.db.collection.find_one(result.inserted_id)
+        self.assertEqual([1], stored['first'])
+        self.assertEqual([], stored['second'])
 
     def test__find_one_accepts_mapping_filter_projection_and_document_id(self):
         document_id = {'tenant': 'one', 'number': 1}

@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import copy
+import decimal
 import re
 import time
+import uuid
 import warnings
 from collections import OrderedDict
 from collections.abc import Iterable
@@ -21,6 +24,11 @@ from mongomock import InvalidURI
 # Get ObjectId from bson if available or import a crafted one. This is not used
 # in this module but is made available for callers of this module.
 try:
+    from bson import Binary
+    from bson import Decimal128
+    from bson import Int64
+    from bson import MaxKey
+    from bson import MinKey
     from bson import ObjectId  # pylint: disable=unused-import
     from bson import Timestamp
     from pymongo import version as pymongo_version
@@ -39,6 +47,24 @@ except ImportError:
 RE_TYPE = type(re.compile(''))
 _HOST_MATCH = re.compile(r'^([^@]+@)?([^:]+|\[[^\]]+\])(:([^:]+))?$')
 _SIMPLE_HOST_MATCH = re.compile(r'^([^:]+|\[[^\]]+\])(:([^:]+))?$')
+_IMMUTABLE_LEAF_TYPES = {
+    type(None),
+    bool,
+    bytes,
+    complex,
+    decimal.Decimal,
+    float,
+    int,
+    ObjectId,
+    RE_TYPE,
+    str,
+    uuid.UUID,
+}
+if HAVE_PYMONGO:
+    # These BSON value objects have immutable public state. Stateful wrappers
+    # such as Code, DBRef, and Regex intentionally stay on the deepcopy path.
+    _IMMUTABLE_LEAF_TYPES.update({Binary, Decimal128, Int64, MaxKey, MinKey, Timestamp})
+_IMMUTABLE_LEAF_TYPES = frozenset(_IMMUTABLE_LEAF_TYPES)
 
 try:
     from bson.tz_util import utc
@@ -331,7 +357,12 @@ def get_current_timestamp():
     return Timestamp(now, _LAST_TIMESTAMP_INC[1])
 
 
-def patch_datetime_awareness_in_document(value):
+def patch_datetime_awareness_in_document(value, copy_values: bool = False):
+    """Normalize BSON containers and datetimes, optionally detaching mutable leaf values.
+
+    Mappings and sequences are always rebuilt. With copy_values enabled, mutable or unknown leaf
+    values are deep-copied while known immutable values are reused.
+    """
     # MongoDB is supposed to stock everything as timezone naive utc date
     # Hence we have to convert incoming datetimes to avoid errors while
     # mixing tz aware and naive.
@@ -339,15 +370,16 @@ def patch_datetime_awareness_in_document(value):
     # datetime use microsecond, so we must lower the precision to mimic mongo.
     if isinstance(value, OrderedDict):
         return OrderedDict(
-            (key, patch_datetime_awareness_in_document(child))
+            (key, patch_datetime_awareness_in_document(child, copy_values))
             for key, child in value.items()
         )
     if isinstance(value, Mapping):
         return {
-            key: patch_datetime_awareness_in_document(child) for key, child in value.items()
+            key: patch_datetime_awareness_in_document(child, copy_values)
+            for key, child in value.items()
         }
     if isinstance(value, (tuple, list)):
-        return [patch_datetime_awareness_in_document(item) for item in value]
+        return [patch_datetime_awareness_in_document(item, copy_values) for item in value]
     if isinstance(value, datetime):
         mongo_us = (value.microsecond // 1000) * 1000
         if value.tzinfo:
@@ -355,7 +387,10 @@ def patch_datetime_awareness_in_document(value):
         return value.replace(microsecond=mongo_us)
     if Timestamp and isinstance(value, Timestamp) and not value.time and not value.inc:
         return get_current_timestamp()
-    return value
+    # Use exact types: subclasses such as bson.Code can carry mutable state.
+    if not copy_values or type(value) in _IMMUTABLE_LEAF_TYPES:  # noqa: E721
+        return value
+    return copy.deepcopy(value)
 
 
 def make_datetime_timezone_aware_in_document(value):
