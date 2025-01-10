@@ -10,6 +10,7 @@ import warnings
 from datetime import datetime
 from datetime import timedelta
 from datetime import tzinfo
+from types import MappingProxyType
 from unittest import mock
 from unittest import skipIf
 from unittest import skipUnless
@@ -374,6 +375,16 @@ class CollectionAPITest(TestCase):
         document = {'a': 1}
         result = self.db.collection.insert_one(document)
         self.assert_document_stored(result.inserted_id, document)
+
+    def test__find_one_accepts_mapping_filter_projection_and_document_id(self):
+        document_id = {'tenant': 'one', 'number': 1}
+        self.db.collection.insert_one({'_id': document_id, 'value': 42, 'hidden': True})
+
+        filter_ = MappingProxyType({'_id': MappingProxyType({'tenant': 'one', 'number': 1})})
+        projection = MappingProxyType({'_id': 0, 'value': 1})
+
+        self.assertEqual({'value': 42}, self.db.collection.find_one(filter_, projection))
+        self.assertEqual({'_id': 0, 'value': 1}, dict(projection))
 
     def test__insert_one_type_error(self):
         with self.assertRaises(TypeError):
@@ -4383,6 +4394,15 @@ class CollectionAPITest(TestCase):
         self.assertEqual(5, len(actual))
         self.assertEqual({doc.get('_id') for doc in actual}, {0, 1, 2, 3, 4})
 
+    def test__aggregate_sample_does_not_mutate_reusable_mapping(self):
+        self.db.a.insert_many([{'_id': i} for i in range(5)])
+        options = {'size': 2}
+        pipeline = [{'$sample': MappingProxyType(options)}]
+
+        self.assertEqual(2, len(list(self.db.a.aggregate(pipeline))))
+        self.assertEqual(2, len(list(self.db.a.aggregate(pipeline))))
+        self.assertEqual({'size': 2}, options)
+
     def test__aggregate_empty(self):
         self.db.a.drop()
 
@@ -5250,6 +5270,22 @@ class CollectionAPITest(TestCase):
             [{'sum': 20.5, 'a': 1.5, 'b': 2, 'c': 2}],
             [{k: v for k, v in doc.items() if k != '_id'} for doc in actual],
         )
+
+    def test__aggregate_add_fields_copies_nested_mapping_before_mutation(self):
+        self.db.collection.insert_one({'_id': 1})
+        source = MappingProxyType({'nested': MappingProxyType({'a': 1})})
+
+        actual = list(
+            self.db.collection.aggregate(
+                [
+                    {'$replaceRoot': {'newRoot': {'$literal': source}}},
+                    {'$addFields': {'nested.b': 2}},
+                ]
+            )
+        )
+
+        self.assertEqual([{'nested': {'a': 1, 'b': 2}}], actual)
+        self.assertEqual({'a': 1}, dict(source['nested']))
 
     def test__aggregate_set(self):
         self.db.collection.insert_one(
@@ -7803,6 +7839,25 @@ class CollectionAPITest(TestCase):
         for item in items:
             with self.assertRaises(mongomock.OperationFailure):
                 collection.aggregate(item)
+
+    def test__aggregate_object_to_array_accepts_mapping(self):
+        self.db.collection.insert_one({'_id': 1})
+        mapping = MappingProxyType({'a': 1, 'b': 2})
+
+        actual = list(
+            self.db.collection.aggregate(
+                [
+                    {
+                        '$project': {
+                            '_id': 0,
+                            'items': {'$objectToArray': {'$literal': mapping}},
+                        }
+                    }
+                ]
+            )
+        )
+
+        self.assertEqual([{'items': [{'k': 'a', 'v': 1}, {'k': 'b', 'v': 2}]}], actual)
 
     def test_aggregate_object_to_array(self):
         collection = self.db.collection

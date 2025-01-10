@@ -13,6 +13,7 @@ import numbers
 import random
 import re
 import warnings
+from collections.abc import Mapping
 
 import pytz
 from packaging import version
@@ -211,7 +212,7 @@ def _sum_operation(values):
 def _merge_objects_operation(values):
     merged_doc = {}
     for v in values:
-        if isinstance(v, dict):
+        if isinstance(v, Mapping):
             merged_doc.update(v)
     return merged_doc
 
@@ -237,7 +238,7 @@ class _Parser:
 
     def parse(self, expression):
         """Parse a MongoDB expression."""
-        if not isinstance(expression, dict):
+        if not isinstance(expression, Mapping):
             # May raise a KeyError despite the ignore missing key.
             return self._parse_basic_expression(expression)
 
@@ -449,12 +450,12 @@ class _Parser:
         if operator == '$literal':
             return value
         if operator == '$let':
-            if not isinstance(value, dict):
+            if not isinstance(value, Mapping):
                 raise InvalidDocument('$let only supports an object as its argument')
             for field in ('vars', 'in'):
                 if field not in value:
                     raise OperationFailure(f"Missing '{field}' parameter to $let")
-            if not isinstance(value['vars'], dict):
+            if not isinstance(value['vars'], Mapping):
                 raise OperationFailure('invalid parameter: expected an object (vars)')
             user_vars = {
                 var_key: self.parse(var_value) for var_key, var_value in value['vars'].items()
@@ -541,7 +542,7 @@ class _Parser:
             a, b = str(self.parse(values[0])), str(self.parse(values[1]))
             return 0 if a == b else -1 if a < b else 1
         if operator == '$regexMatch':
-            if not isinstance(values, dict):
+            if not isinstance(values, Mapping):
                 raise OperationFailure(
                     f'$regexMatch expects an object of named arguments but found: {type(values)}'
                 )
@@ -609,7 +610,7 @@ class _Parser:
         )
 
     def _handle_date_operator(self, operator, values):
-        if isinstance(values, dict) and values.keys() == {'date', 'timezone'}:
+        if isinstance(values, Mapping) and values.keys() == {'date', 'timezone'}:
             value = self.parse(values['date'])
             target_tz = pytz.timezone(values['timezone'])
             out_value = value.replace(tzinfo=pytz.utc).astimezone(target_tz)
@@ -637,12 +638,12 @@ class _Parser:
         if operator == '$millisecond':
             return int(out_value.microsecond / 1000)
         if operator == '$dateToString':
-            if not isinstance(values, dict):
+            if not isinstance(values, Mapping):
                 raise OperationFailure(
                     '$dateToString operator must correspond a dict'
                     'that has "format" and "date" field.'
                 )
-            if not isinstance(values, dict) or not {'format', 'date'} <= set(values):
+            if not isinstance(values, Mapping) or not {'format', 'date'} <= set(values):
                 raise OperationFailure(
                     '$dateToString operator must correspond a dict'
                     'that has "format" and "date" field.'
@@ -667,7 +668,7 @@ class _Parser:
                 )
             return out_value['date'].strftime(out_value['format'])
         if operator == '$dateFromParts':
-            if not isinstance(out_value, dict):
+            if not isinstance(out_value, Mapping):
                 raise OperationFailure(
                     f'{operator} operator must correspond a dict '
                     'that has "year" or "isoWeekYear" field.'
@@ -724,7 +725,7 @@ class _Parser:
             return None if None in parsed_list else list(itertools.chain.from_iterable(parsed_list))
 
         if operator == '$map':
-            if not isinstance(value, dict):
+            if not isinstance(value, Mapping):
                 raise OperationFailure('$map only supports an object as its argument')
 
             # NOTE: while the two validations below could be achieved with
@@ -777,7 +778,7 @@ class _Parser:
             return len(array_value)
 
         if operator == '$filter':
-            if not isinstance(value, dict):
+            if not isinstance(value, Mapping):
                 raise OperationFailure('$filter only supports an object as its argument')
             extra_params = set(value) - {'input', 'cond', 'as'}
             if extra_params:
@@ -928,7 +929,7 @@ class _Parser:
                     f'$arrayToObject requires an array input, found: {type(parsed)}'
                 )
 
-            if all(isinstance(x, dict) and set(x.keys()) == {'k', 'v'} for x in parsed):
+            if all(isinstance(x, Mapping) and set(x.keys()) == {'k', 'v'} for x in parsed):
                 return {d['k']: d['v'] for d in parsed}
 
             if all(isinstance(x, (list, tuple)) and len(x) == 2 for x in parsed):
@@ -949,7 +950,7 @@ class _Parser:
             if parsed is None:
                 return None
 
-            if not isinstance(parsed, (dict, collections.OrderedDict)):
+            if not isinstance(parsed, Mapping):
                 raise OperationFailure(
                     f'$objectToArray requires an object input, found: {type(parsed)}'
                 )
@@ -1003,7 +1004,7 @@ class _Parser:
         if operator == '$cond':
             if isinstance(values, list):
                 condition, true_case, false_case = values
-            elif isinstance(values, dict):
+            elif isinstance(values, Mapping):
                 condition = values['if']
                 true_case = values['then']
                 false_case = values['else']
@@ -1019,7 +1020,7 @@ class _Parser:
 
     def _handle_control_flow_operator(self, operator, values):
         if operator == '$switch':
-            if not isinstance(values, dict):
+            if not isinstance(values, Mapping):
                 raise OperationFailure(
                     f'$switch requires an object as an argument, found: {type(values)}'
                 )
@@ -1033,7 +1034,7 @@ class _Parser:
                 raise OperationFailure('$switch requires at least one branch.')
 
             for branch in branches:
-                if not isinstance(branch, dict):
+                if not isinstance(branch, Mapping):
                     raise OperationFailure(
                         f'$switch expected each branch to be an object, found: {type(branch)}'
                     )
@@ -1156,7 +1157,7 @@ def _fix_sort_key(key_getter):
     def fixed_getter(doc):
         key = key_getter(doc)
         # Convert dictionaries to make sorted() work in Python 3.
-        if isinstance(key, dict):
+        if isinstance(key, Mapping):
             return sorted(key.items())
         return key
 
@@ -1237,14 +1238,14 @@ def _recursive_get(match, nested_fields):
     if isinstance(head, (list, tuple)):
         for m in head:
             yield from _recursive_get(m, remaining_fields)
-    elif isinstance(head, dict):
+    elif isinstance(head, Mapping):
         yield from _recursive_get(head, remaining_fields)
 
 
 def _handle_graph_lookup_stage(in_collection, database, options, user_vars):
     if not isinstance(options.get('maxDepth', 0), int):
         raise OperationFailure("Argument 'maxDepth' to $graphLookup must be a number")
-    if not isinstance(options.get('restrictSearchWithMatch', {}), dict):
+    if not isinstance(options.get('restrictSearchWithMatch', {}), Mapping):
         raise OperationFailure(
             "Argument 'restrictSearchWithMatch' to $graphLookup must be a Dictionary"
         )
@@ -1410,13 +1411,14 @@ def _handle_bucket_stage(in_collection, unused_database, options, user_vars):
 
 
 def _handle_sample_stage(in_collection, unused_database, options, unused_user_vars):
-    if not isinstance(options, dict):
+    if not isinstance(options, Mapping):
         raise OperationFailure('the $sample stage specification must be an object')
-    size = options.pop('size', None)
+    size = options.get('size')
     if size is None:
         raise OperationFailure('$sample stage must specify a size')
-    if options:
-        raise OperationFailure(f'unrecognized option to $sample: {set(options).pop()}')
+    unknown_options = set(options) - {'size'}
+    if unknown_options:
+        raise OperationFailure(f'unrecognized option to $sample: {unknown_options.pop()}')
     shuffled = list(in_collection)
     _random.shuffle(shuffled)
     return shuffled[:size]
@@ -1436,7 +1438,7 @@ def _handle_sort_stage(in_collection, unused_database, options, unused_user_vars
 
 
 def _handle_unwind_stage(in_collection, unused_database, options, unused_user_vars):
-    if not isinstance(options, dict):
+    if not isinstance(options, Mapping):
         options = {'path': options}
     path = options['path']
     if not isinstance(path, str) or path[0] != '$':
@@ -1525,18 +1527,18 @@ def _project_by_spec(doc, proj_spec, is_include):
                 output[key] = value
             continue
 
-        if not isinstance(proj_spec[key], dict):
+        if not isinstance(proj_spec[key], Mapping):
             if is_include:
                 output[key] = value
             continue
 
-        if isinstance(value, dict):
+        if isinstance(value, Mapping):
             output[key] = _project_by_spec(value, proj_spec[key], is_include)
         elif isinstance(value, list):
             output[key] = [
                 _project_by_spec(array_value, proj_spec[key], is_include)
                 for array_value in value
-                if isinstance(array_value, dict)
+                if isinstance(array_value, Mapping)
             ]
         elif not is_include:
             output[key] = value
@@ -1556,7 +1558,7 @@ def _handle_replace_root_stage(in_collection, unused_database, options, user_var
             )
         except KeyError:
             new_doc = NOTHING
-        if not isinstance(new_doc, dict):
+        if not isinstance(new_doc, Mapping):
             raise OperationFailure(
                 f"'newRoot' expression must evaluate to an object, but resulting value was: "
                 f'{new_doc}'
@@ -1630,9 +1632,8 @@ def _handle_add_fields_stage(in_collection, unused_database, options, user_vars)
                 continue
             parts = field.split('.')
             for subfield in parts[:-1]:
-                out_doc[subfield] = out_doc.get(subfield, {})
-                if not isinstance(out_doc[subfield], dict):
-                    out_doc[subfield] = {}
+                nested = out_doc.get(subfield, {})
+                out_doc[subfield] = dict(nested) if isinstance(nested, Mapping) else {}
                 out_doc = out_doc[subfield]
             out_doc[parts[-1]] = out_value
     return out_collection

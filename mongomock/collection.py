@@ -242,18 +242,18 @@ def _combine_projection_spec(projection_fields_spec):
     tmp_spec = OrderedDict()
     for f, v in projection_fields_spec.items():
         if '.' not in f:
-            if isinstance(tmp_spec.get(f), dict):
+            if isinstance(tmp_spec.get(f), Mapping):
                 if not v:
                     raise NotImplementedError(
                         f'Mongomock does not support overriding excluding '
                         f'projection: {projection_fields_spec}'
                     )
                 raise OperationFailure(f'Path collision at {f}')
-            tmp_spec[f] = v
+            tmp_spec[f] = OrderedDict(v) if isinstance(v, Mapping) else v
         else:
             split_field = f.split('.', 1)
             base_field, new_field = tuple(split_field)
-            if not isinstance(tmp_spec.get(base_field), dict):
+            if not isinstance(tmp_spec.get(base_field), Mapping):
                 if base_field in tmp_spec:
                     raise OperationFailure(f'Path collision at {f} remaining portion {new_field}')
                 tmp_spec[base_field] = OrderedDict()
@@ -261,7 +261,7 @@ def _combine_projection_spec(projection_fields_spec):
 
     combined_spec = OrderedDict()
     for f, v in tmp_spec.items():
-        if isinstance(v, dict):
+        if isinstance(v, Mapping):
             combined_spec[f] = _combine_projection_spec(v)
         else:
             combined_spec[f] = v
@@ -279,12 +279,12 @@ def _project_by_spec(doc, combined_projection_spec, is_include, container):
 
     for key, val in doc.items():
         spec = combined_projection_spec.get(key, NOTHING)
-        if isinstance(spec, dict):
+        if isinstance(spec, Mapping):
             if isinstance(val, (list, tuple)):
                 doc_copy[key] = [
                     _project_by_spec(sub_doc, spec, is_include, container) for sub_doc in val
                 ]
-            elif isinstance(val, dict):
+            elif isinstance(val, Mapping):
                 doc_copy[key] = _project_by_spec(val, spec, is_include, container)
         elif (is_include and spec is not NOTHING) or (not is_include and spec is NOTHING):
             doc_copy[key] = _copy_field(val, container)
@@ -298,7 +298,7 @@ def _copy_field(obj, container):
         for item in obj:
             new.append(_copy_field(item, container))
         return new
-    if isinstance(obj, dict):
+    if isinstance(obj, Mapping):
         new = container()
         for key, value in obj.items():
             new[key] = _copy_field(value, container)
@@ -634,7 +634,7 @@ class Collection:
             data['_id'] = ObjectId()
 
         object_id = data['_id']
-        if isinstance(object_id, dict):
+        if isinstance(object_id, Mapping):
             object_id = helpers.hashdict(object_id)
         if object_id in self._store:
             raise DuplicateKeyError('E11000 Duplicate Key Error', 11000)
@@ -961,7 +961,7 @@ class Collection:
                         if field not in existing_document:
                             existing_document[field] = []
                         # document should be a list append to it
-                        if isinstance(value, dict) and '$each' in value:
+                        if isinstance(value, Mapping) and '$each' in value:
                             # append the list to the field
                             existing_document[field] += [
                                 obj
@@ -995,7 +995,7 @@ class Collection:
                             # if the list exists, then use that list
                             push_results = subdocument[nested_field_list[-1]]
 
-                        if isinstance(value, dict) and '$each' in value:
+                        if isinstance(value, Mapping) and '$each' in value:
                             push_results += [
                                 obj for obj in list(value['$each']) if obj not in push_results
                             ]
@@ -1018,7 +1018,7 @@ class Collection:
                         pull_results = []
                         # and the last subdoc should be an array
                         for obj in subdocument[nested_field_list[-1]]:
-                            if isinstance(obj, dict):
+                            if isinstance(obj, Mapping):
                                 for pull_key, pull_value in value.items():
                                     if obj[pull_key] != pull_value:
                                         pull_results.append(obj)
@@ -1039,7 +1039,7 @@ class Collection:
                             continue
 
                         arr_copy = copy.deepcopy(arr)
-                        if isinstance(value, dict):
+                        if isinstance(value, Mapping):
                             for obj in arr_copy:
                                 try:
                                     is_matching = filter_applies(value, obj)
@@ -1082,10 +1082,10 @@ class Collection:
                     )
 
                     # Push the new element or elements.
-                    if isinstance(subdocument, dict) and field not in subdocument:
+                    if isinstance(subdocument, MutableMapping) and field not in subdocument:
                         subdocument[field] = []
                     push_results = subdocument[field]
-                    if isinstance(value, dict) and '$each' in value:
+                    if isinstance(value, Mapping) and '$each' in value:
                         if '$position' in value:
                             push_results = (
                                 push_results[0 : value['$position']]
@@ -1097,7 +1097,7 @@ class Collection:
 
                         if '$sort' in value:
                             sort_spec = value['$sort']
-                            if isinstance(sort_spec, dict):
+                            if isinstance(sort_spec, Mapping):
                                 sort_key = set(sort_spec.keys()).pop()
                                 push_results = sorted(
                                     push_results,
@@ -1243,14 +1243,14 @@ class Collection:
                     sub_expanded[key_part] = {}
                 sub_expanded = sub_expanded[key_part]
                 key = '.'.join(key_parts[: i + 1])
-                if not isinstance(sub_expanded, dict):
+                if not isinstance(sub_expanded, MutableMapping):
                     _raise_incompatible(key)
                 paths[key] = k
             sub_expanded[key_parts[-1]] = v
         return expanded
 
     def _discard_operators(self, doc):
-        if not doc or not isinstance(doc, dict):
+        if not doc or not isinstance(doc, Mapping):
             return doc, False
         new_doc = OrderedDict()
         for k, v in doc.items():
@@ -1299,8 +1299,8 @@ class Collection:
     def _get_dataset(self, spec, sort, fields, as_class):
         dataset = self._iter_documents(spec)
         if sort:
-            if isinstance(sort, dict):
-                sort = sort.items()
+            if isinstance(sort, Mapping):
+                sort = list(sort.items())
             for sort_key, sort_direction in reversed(sort):
                 if sort_key == '$natural':
                     if sort_direction < 0:
@@ -1325,7 +1325,7 @@ class Collection:
         result = {}
         allowed_projection_operators = {'$elemMatch', '$slice'}
         for key, value in fields.items():
-            if isinstance(value, dict):
+            if isinstance(value, Mapping):
                 for op in value:
                     if op not in allowed_projection_operators:
                         raise ValueError(f'Unsupported projection option: {op}')
@@ -1408,8 +1408,10 @@ class Collection:
 
         if not fields:
             fields = {'_id': 1}
-        if not isinstance(fields, dict):
+        if not isinstance(fields, Mapping):
             fields = helpers.fields_list_to_dict(fields)
+        else:
+            fields = dict(fields)
 
         # we can pass in something like {'_id':0, 'field':1}, so pull the id
         # value out and hang on to it until later
@@ -1518,7 +1520,7 @@ class Collection:
                     continue
                 except ValueError:
                     pass
-            elif isinstance(doc, dict):
+            elif isinstance(doc, MutableMapping):
                 if updater is _unset_updater and part not in doc:
                     # If the parent doesn't exists, so does it child.
                     return
@@ -1707,7 +1709,7 @@ class Collection:
         deleted_count = 0
         for doc in to_delete:
             doc_id = doc['_id']
-            if isinstance(doc_id, dict):
+            if isinstance(doc_id, Mapping):
                 doc_id = helpers.hashdict(doc_id)
             del self._store[doc_id]
             deleted_count += 1
@@ -2007,7 +2009,7 @@ class Collection:
                 out_collection.insert(reduced_rows)
                 ret_val = out_collection
                 full_dict['result'] = {'db': out['db'], 'collection': out['replace']}
-            elif isinstance(out, dict) and out.get('inline'):
+            elif isinstance(out, Mapping) and out.get('inline'):
                 ret_val = reduced_rows
                 full_dict['result'] = reduced_rows
             else:
@@ -2310,7 +2312,7 @@ class Cursor:
                 if not isinstance(values, (tuple, list)):
                     values = [values]
                 for value in values:
-                    if isinstance(value, dict):
+                    if isinstance(value, Mapping):
                         unique.add(helpers.hashdict(value))
                     else:
                         unique.add(value)
@@ -2385,7 +2387,7 @@ def _set_updater(doc, field_name, value, codec_options=None):
                 f'cannot start with "$" (found: {field_name})'
             )
         _bson_encode({field_name: value}, check_keys=check_keys, codec_options=codec_options)
-    if isinstance(doc, dict):
+    if isinstance(doc, MutableMapping):
         doc[field_name] = value
     if isinstance(doc, list):
         field_index = int(field_name)
@@ -2398,12 +2400,12 @@ def _set_updater(doc, field_name, value, codec_options=None):
 
 
 def _unset_updater(doc, field_name, value, codec_options=None):
-    if isinstance(doc, dict):
+    if isinstance(doc, MutableMapping):
         doc.pop(field_name, None)
 
 
 def _inc_updater(doc, field_name, value, codec_options=None):
-    if isinstance(doc, dict):
+    if isinstance(doc, MutableMapping):
         doc[field_name] = doc.get(field_name, 0) + value
 
     if isinstance(doc, list):
@@ -2419,12 +2421,12 @@ def _inc_updater(doc, field_name, value, codec_options=None):
 
 
 def _max_updater(doc, field_name, value, codec_options=None):
-    if isinstance(doc, dict):
+    if isinstance(doc, MutableMapping):
         doc[field_name] = max(doc.get(field_name, value), value)
 
 
 def _min_updater(doc, field_name, value, codec_options=None):
-    if isinstance(doc, dict):
+    if isinstance(doc, MutableMapping):
         doc[field_name] = min(doc.get(field_name, value), value)
 
 
@@ -2432,7 +2434,7 @@ def _pop_updater(doc, field_name, value, codec_options=None):
     if value not in {1, -1}:
         raise WriteError('$pop expects 1 or -1, found: ' + str(value))
 
-    if isinstance(doc, dict):
+    if isinstance(doc, MutableMapping):
         if isinstance(doc[field_name], (tuple, list)):
             doc[field_name] = list(doc[field_name])
             _pop_from_list(doc[field_name], value)
@@ -2459,7 +2461,7 @@ def _pop_from_list(list_instance, mongo_pop_value, codec_options=None):
 
 
 def _current_date_updater(doc, field_name, value, codec_options=None):
-    if isinstance(doc, dict):
+    if isinstance(doc, MutableMapping):
         if value == {'$type': 'timestamp'}:
             # TODO(juannyg): get_current_timestamp should also be using helpers utcnow,
             # as it currently using time.time internally

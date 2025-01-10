@@ -6,6 +6,7 @@ import warnings
 from collections import OrderedDict
 from collections.abc import Iterable
 from collections.abc import Mapping
+from collections.abc import MutableMapping
 from datetime import datetime
 from datetime import timedelta
 from datetime import tzinfo
@@ -143,7 +144,7 @@ class hashdict(dict):  # noqa: N801
 
     def __key(self):
         return frozenset(
-            (k, hashdict(v) if isinstance(v, dict) else tuple(v) if isinstance(v, list) else v)
+            (k, hashdict(v) if isinstance(v, Mapping) else tuple(v) if isinstance(v, list) else v)
             for k, v in self.items()
         )
 
@@ -336,9 +337,15 @@ def patch_datetime_awareness_in_document(value):
     # mixing tz aware and naive.
     # On top of that, MongoDB date precision is up to millisecond, where Python
     # datetime use microsecond, so we must lower the precision to mimic mongo.
-    for best_type in (OrderedDict, dict):
-        if isinstance(value, best_type):
-            return best_type((k, patch_datetime_awareness_in_document(v)) for k, v in value.items())
+    if isinstance(value, OrderedDict):
+        return OrderedDict(
+            (key, patch_datetime_awareness_in_document(child))
+            for key, child in value.items()
+        )
+    if isinstance(value, Mapping):
+        return {
+            key: patch_datetime_awareness_in_document(child) for key, child in value.items()
+        }
     if isinstance(value, (tuple, list)):
         return [patch_datetime_awareness_in_document(item) for item in value]
     if isinstance(value, datetime):
@@ -355,7 +362,7 @@ def make_datetime_timezone_aware_in_document(value):
     # MongoClient support tz_aware=True parameter to return timezone-aware
     # datetime objects. Given the date is stored internally without timezone
     # information, all returned datetime have utc as timezone.
-    if isinstance(value, dict):
+    if isinstance(value, Mapping):
         return {k: make_datetime_timezone_aware_in_document(v) for k, v in value.items()}
     if isinstance(value, (tuple, list)):
         return [make_datetime_timezone_aware_in_document(item) for item in value]
@@ -369,7 +376,7 @@ def get_value_by_dot(doc, key, can_generate_array=False):
     result = doc
     key_items = key.split('.')
     for key_index, key_item in enumerate(key_items):
-        if isinstance(result, dict):
+        if isinstance(result, Mapping):
             result = result[key_item]
 
         elif isinstance(result, (list, tuple)):
@@ -401,9 +408,9 @@ def set_value_by_dot(doc, key, value):
         child_key = key
         parent = doc
 
-    if isinstance(parent, dict):
+    if isinstance(parent, MutableMapping):
         parent[child_key] = value
-    elif isinstance(parent, (list, tuple)):
+    elif isinstance(parent, list):
         try:
             parent[int(child_key)] = value
         except (ValueError, IndexError) as err:

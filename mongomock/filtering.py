@@ -3,6 +3,7 @@ import numbers
 import operator
 import re
 import uuid
+from collections.abc import Mapping
 from datetime import datetime
 from typing import ClassVar
 
@@ -85,7 +86,7 @@ class _Filterer:
         )
 
     def apply(self, search_filter, document, user_vars=None):
-        if not isinstance(search_filter, dict):
+        if not isinstance(search_filter, Mapping):
             raise OperationFailure('the match filter must be an expression in an object')
 
         for key, search in search_filter.items():
@@ -112,10 +113,10 @@ class _Filterer:
 
             is_match = False
 
-            is_checking_negative_match = isinstance(search, dict) and {'$ne', '$nin'} & set(
+            is_checking_negative_match = isinstance(search, Mapping) and {'$ne', '$nin'} & set(
                 search.keys()
             )
-            is_checking_positive_match = not isinstance(search, dict) or (
+            is_checking_positive_match = not isinstance(search, Mapping) or (
                 set(search.keys()) - {'$ne', '$nin'}
             )
             has_candidates = False
@@ -123,7 +124,7 @@ class _Filterer:
             if search == {'$exists': False} and not iter_key_candidates(key, document):
                 continue
 
-            if isinstance(search, dict) and '$all' in search:
+            if isinstance(search, Mapping) and '$all' in search:
                 if not self._all_op(iter_key_candidates(key, document), search['$all']):
                     return False
                 # if there are no query operators then continue
@@ -134,7 +135,7 @@ class _Filterer:
                 has_candidates |= doc_val is not NOTHING
                 is_ops_filter = (
                     search
-                    and isinstance(search, dict)
+                    and isinstance(search, Mapping)
                     and all(key.startswith('$') for key in search)
                 )
                 if is_ops_filter:
@@ -186,7 +187,7 @@ class _Filterer:
         return True
 
     def _not_op(self, d, k, s):
-        if isinstance(s, dict):
+        if isinstance(s, Mapping):
             for key in s:
                 if key not in self._operator_map and key not in LOGICAL_OPERATOR_MAP:
                     raise OperationFailure(f'Unknown operator: {key}')
@@ -199,7 +200,7 @@ class _Filterer:
     def _elem_match_op(self, doc_val, query):
         if not isinstance(doc_val, list):
             return False
-        if not isinstance(query, dict):
+        if not isinstance(query, Mapping):
             raise OperationFailure('$elemMatch needs an Object')
         for item in doc_val:
             try:
@@ -216,7 +217,7 @@ class _Filterer:
         dv = _force_list(doc_val)
         matches = []
         for x in search_val:
-            if isinstance(x, dict) and '$elemMatch' in x:
+            if isinstance(x, Mapping) and '$elemMatch' in x:
                 matches.append(self._elem_match_op(doc_val, x['$elemMatch']))
             else:
                 matches.append(x in dv)
@@ -237,7 +238,7 @@ def iter_key_candidates(key, doc):
     if isinstance(doc, list):
         return _iter_key_candidates_sublist(key, doc)
 
-    if not isinstance(doc, dict):
+    if not isinstance(doc, Mapping):
         return ()
 
     key_parts = key.split('.')
@@ -267,7 +268,7 @@ def _iter_key_candidates_sublist(key, doc):
         # subkey is not an integer...
         ret = []
         for sub_doc in doc:
-            if isinstance(sub_doc, dict):
+            if isinstance(sub_doc, Mapping):
                 if sub_key in sub_doc:
                     ret.extend(iter_key_candidates(key_remainder, sub_doc[sub_key]))
                 else:
@@ -343,7 +344,7 @@ def bson_compare(op, a, b, can_compare_types=True):
     if type(b).__name__ == 'DBRef' and hasattr(b, 'as_doc'):
         b = b.as_doc()
 
-    if isinstance(a, dict):
+    if isinstance(a, Mapping):
         # MongoDb server compares the type before comparing the keys
         # https://github.com/mongodb/mongo/blob/f10f214/src/mongo/bson/bsonelement.cpp#L516
         # even though the documentation does not say anything about that.
@@ -384,7 +385,7 @@ def _get_compare_type(val):
         return 10
     if isinstance(val, str):
         return 15
-    if isinstance(val, dict):
+    if isinstance(val, Mapping):
         return 20
     if isinstance(val, (tuple, list)):
         return 25
@@ -417,7 +418,7 @@ def _regex(doc_val, regex):
 
 
 def _size_op(doc_val, search_val):
-    if isinstance(doc_val, (list, tuple, dict)):
+    if isinstance(doc_val, (list, tuple, Mapping)):
         return search_val == len(doc_val)
     return search_val == 1 if doc_val and doc_val is not NOTHING else 0
 
@@ -504,7 +505,7 @@ LOGICAL_OPERATOR_MAP = {
 TYPE_MAP = {
     'double': lambda v: isinstance(v, float),
     'string': lambda v: isinstance(v, str),
-    'object': lambda v: isinstance(v, dict),
+    'object': lambda v: isinstance(v, Mapping),
     'array': lambda v: isinstance(v, list),
     'binData': lambda v: isinstance(v, bytes),
     'undefined': None,
