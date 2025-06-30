@@ -275,6 +275,8 @@ class _Parser:
                 return self._handle_type_operator(k, v)
             if k in boolean_operators:
                 return self._handle_boolean_operator(k, v)
+            if k in object_operators:
+                return self._handle_object_operator(k, v)
             if k in text_search_operators + projection_operators + object_operators:
                 raise NotImplementedError(
                     f"'{k}' is a valid operation but it is not supported by Mongomock yet."
@@ -564,7 +566,8 @@ class _Parser:
             except KeyError:
                 return False
             options = None
-            for option in values.get('options', ''):
+            raw_options = values.get('options', '').lower()
+            for option in raw_options:
                 if option not in 'imxs':
                     raise OperationFailure(f'$regexMatch invalid flag in regex options: {option}')
                 re_option = getattr(re, option.upper())
@@ -581,7 +584,7 @@ class _Parser:
             elif isinstance(regex_val, helpers.RE_TYPE):
                 if options and not regex_val.flags:
                     regex = re.compile(regex_val.pattern, options)
-                elif regex_val.flags & ~(re.I | re.M | re.X | re.S):
+                elif regex_val.flags & ~(re.I | re.M | re.X | re.S | re.U):
                     raise OperationFailure(
                         f'$regexMatch invalid flag in regex options: {regex_val.flags}'
                     )
@@ -589,7 +592,7 @@ class _Parser:
                     regex = regex_val
             elif isinstance(regex_val, _RE_TYPES):
                 # bson.Regex
-                if regex_val.flags & ~(re.I | re.M | re.X | re.S):
+                if regex_val.flags & ~(re.I | re.M | re.X | re.S | re.U):
                     raise OperationFailure(
                         f'$regexMatch invalid flag in regex options: {regex_val.flags}'
                     )
@@ -1074,6 +1077,17 @@ class _Parser:
         raise NotImplementedError(
             f"Although '{operator}' is a valid set operator for the aggregation "
             f'pipeline, it is currently not implemented in Mongomock.'
+        )
+
+    def _handle_object_operator(self, operator, values):
+        if operator == '$mergeObjects':
+            values = self.parse(values) if isinstance(values, str) else self.parse_many(values)
+            return _merge_objects_operation(values)
+
+        # This should never happen: it is only a safe fallback if something went wrong.
+        raise NotImplementedError(
+            f"Although '{operator}' is a valid object operator for the aggregation pipeline, "
+            'it is currently not implemented in Mongomock.'
         )
 
 

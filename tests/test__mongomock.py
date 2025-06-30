@@ -685,18 +685,20 @@ class MongoClientCollectionTest(_CollectionComparisonTest):
             {
                 'name': {
                     '$regex': upper_regex,
-                    '$options': 'I',
+                    '$options': 'i',
                 }
             }
         )
-        self.cmp.compare_ignore_order.find(
-            {
-                'name': {
-                    '$regex': upper_regex,
-                    '$options': 'z',
+        with self.assertRaises(OperationFailure) as cm:
+            self.cmp.compare_ignore_order.find(
+                {
+                    'name': {
+                        '$regex': upper_regex,
+                        '$options': 'z',
+                    }
                 }
-            }
-        )
+            )
+        self.assertIn('invalid flag', str(cm.exception))
 
     def test__find_by_regex_string(self):
         """Test searching with regular expression string."""
@@ -708,8 +710,9 @@ class MongoClientCollectionTest(_CollectionComparisonTest):
         self.cmp.compare_ignore_order.find({'name': {'$regex': 'bob|sam'}})
         self.cmp.compare_ignore_order.find({'name': {'$regex': 'bob|notsam'}})
         self.cmp.compare_ignore_order.find({'name': {'$regex': 'Bob', '$options': 'i'}})
-        self.cmp.compare_ignore_order.find({'name': {'$regex': 'Bob', '$options': 'I'}})
-        self.cmp.compare_ignore_order.find({'name': {'$regex': 'Bob', '$options': 'z'}})
+        self.cmp.compare_ignore_order.find({'name': {'$regex': 'Bob', '$options': 'i'}})
+        with self.assertRaises(OperationFailure):
+            self.cmp.compare_ignore_order.find({'name': {'$regex': 'Bob', '$options': 'z'}})
 
     def test__find_in_array_by_regex_object(self):
         """Test searching inside array with regular expression object."""
@@ -4792,6 +4795,25 @@ class MongoClientAggregateTest(_CollectionComparisonTest):
         pipeline = [
             {'$addFields': {'b': '$a'}},
         ]
+        self.cmp.compare_ignore_order.aggregate(pipeline)
+
+    def test__aggregate_merge_objects_replace_root(self):
+        self.cmp.do.drop()
+        self.cmp.do.insert_many(
+            [
+                {'_id': ObjectId(), 'a': {'a': '1'}, 'b': {'c': '1', 'd': 2}},
+                {'_id': ObjectId(), 'a': {'a': '1'}, 'b': {'e': 3, 'f': '4'}},
+                {'_id': ObjectId(), 'a': {'a': '1'}, 'c': '2'},
+                {'_id': ObjectId(), 'a': {'a': '1'}, 'b': None},
+                {'_id': ObjectId(), 'a': {'a': 2}, 'b': None},
+                {'_id': ObjectId(), 'a': {'a': 2}, 'b': {'c': None, 'd': 6}},
+                {'_id': ObjectId(), 'a': {'a': 2}, 'b': {'c': '7', 'd': None, 'e': 9, 'f': '10'}},
+                {'_id': ObjectId(), 'a': {'a': 3}, 'b': None},
+                {'_id': ObjectId(), 'a': {'a': 3}, 'b': {}},
+                {'_id': ObjectId(), 'a': {'a': 4}, 'b': None},
+            ]
+        )
+        pipeline = [{'$replaceRoot': {'newRoot': {'$mergeObjects': ['$a', '$b']}}}]
         self.cmp.compare_ignore_order.aggregate(pipeline)
 
 
