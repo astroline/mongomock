@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 import copy
 import decimal
 import re
@@ -121,15 +119,13 @@ def print_deprecation_warning(old_param_name, new_param_name):
     )
 
 
-def create_index_list(
-    keys: str | Iterable[str, tuple[str, int]], direction: Optional[int] = None
-) -> list[tuple[str, int]]:
+def create_index_list(keys, direction: Optional[int] = None):
     """Helper to generate a list of (key, direction) pairs.
 
     It takes such a list, or a single key, or a single key and direction.
     """
 
-    def make_key(spec: str | tuple[str, int]) -> tuple[str, int]:
+    def make_key(spec):
         if isinstance(spec, tuple):
             if len(spec) != 2:
                 raise TypeError('index spec has to be a tuple (key, direction)')
@@ -143,7 +139,7 @@ def create_index_list(
     return [make_key(item) for item in keys]
 
 
-def gen_index_name(keys: list[tuple[str, int]]) -> str:
+def gen_index_name(keys) -> str:
     """Generate an index name based on the list of keys with directions."""
     return '_'.join(f'{key}_{direction}' for key, direction in keys)
 
