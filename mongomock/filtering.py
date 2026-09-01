@@ -12,6 +12,7 @@ from sentinels import NOTHING
 from . import OperationFailure
 from .helpers import ObjectId
 from .helpers import RE_TYPE
+from .helpers import dbref_as_mapping
 
 
 try:
@@ -289,7 +290,10 @@ def iter_key_candidates(key, doc):
         return _iter_key_candidates_sublist(key, doc)
 
     if not isinstance(doc, Mapping):
-        return ()
+        dbref_view = dbref_as_mapping(doc)
+        if dbref_view is None:
+            return ()
+        doc = dbref_view
 
     key_parts = key.split('.')
     if len(key_parts) == 1:
@@ -323,6 +327,13 @@ def _iter_key_candidates_sublist(key, doc):
                     ret.extend(iter_key_candidates(key_remainder, sub_doc[sub_key]))
                 else:
                     ret.append(NOTHING)
+            else:
+                dbref_view = dbref_as_mapping(sub_doc)
+                if dbref_view is not None:
+                    if sub_key in dbref_view:
+                        ret.extend(iter_key_candidates(key_remainder, dbref_view[sub_key]))
+                    else:
+                        ret.append(NOTHING)
         return ret
 
     # subkey is an index

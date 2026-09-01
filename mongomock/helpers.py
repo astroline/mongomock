@@ -23,6 +23,7 @@ from mongomock import InvalidURI
 # in this module but is made available for callers of this module.
 try:
     from bson import Binary
+    from bson import DBRef
     from bson import Decimal128
     from bson import Int64
     from bson import MaxKey
@@ -36,6 +37,7 @@ try:
 except ImportError:
     from mongomock.object_id import ObjectId  # noqa
 
+    DBRef = None
     Timestamp = None
     # Default Pymongo version if not present.
     PYMONGO_VERSION = version.parse('4.0')
@@ -402,6 +404,14 @@ def make_datetime_timezone_aware_in_document(value):
     return value
 
 
+def dbref_as_mapping(value):
+    """Return a DBRef's stored fields as a mapping for dotted-path traversal."""
+
+    if DBRef is None or not isinstance(value, DBRef):
+        return None
+    return value.as_doc()
+
+
 def get_value_by_dot(doc, key, can_generate_array=False):
     """Get dictionary value using dotted key"""
     result = doc
@@ -425,7 +435,10 @@ def get_value_by_dot(doc, key, can_generate_array=False):
                 raise KeyError(key_index) from err
 
         else:
-            raise KeyError(key_index)
+            dbref_view = dbref_as_mapping(result)
+            if dbref_view is None or key_item not in dbref_view:
+                raise KeyError(key_index)
+            result = dbref_view[key_item]
 
     return result
 

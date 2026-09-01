@@ -458,6 +458,47 @@ class CollectionAPITest(TestCase):
         self.assertEqual({'value': 42}, self.db.collection.find_one(filter_, projection))
         self.assertEqual({'_id': 0, 'value': 1}, dict(projection))
 
+    @skipIf(not helpers.HAVE_PYMONGO, 'pymongo not installed')
+    def test__find_supports_dotted_paths_in_dbrefs(self):
+        first_ref = DBRef('placements', 'storage-1', 'archive', tenant='one')
+        second_ref = DBRef('placements', 'storage-2')
+        self.db.collection.insert_many(
+            [
+                {'_id': 'a', 'storage': first_ref},
+                {
+                    '_id': 'b',
+                    'storage': second_ref,
+                    'replicas': [DBRef('placements', 'storage-3')],
+                },
+            ]
+        )
+
+        self.assertEqual(
+            'storage-1', helpers.get_value_by_dot({'storage': first_ref}, 'storage.$id')
+        )
+        self.assertEqual(
+            'one', helpers.get_value_by_dot({'storage': first_ref}, 'storage.tenant')
+        )
+        self.assertEqual('a', self.db.collection.find_one({'storage.$id': 'storage-1'})['_id'])
+        self.assertEqual(
+            {'a', 'b'},
+            {
+                doc['_id']
+                for doc in self.db.collection.find(
+                    {'storage.$id': {'$in': ['storage-1', 'storage-2']}}
+                )
+            },
+        )
+        self.assertEqual(
+            {'a', 'b'},
+            {doc['_id'] for doc in self.db.collection.find({'storage.$ref': 'placements'})},
+        )
+        self.assertEqual('a', self.db.collection.find_one({'storage.$db': 'archive'})['_id'])
+        self.assertEqual('a', self.db.collection.find_one({'storage.tenant': 'one'})['_id'])
+        self.assertEqual(
+            'b', self.db.collection.find_one({'replicas.$id': 'storage-3'})['_id']
+        )
+
     def test__find_one_id_lookup_preserves_operator_and_regex_queries(self):
         self.db.collection.insert_many(
             [{'_id': 'alpha', 'value': 1}, {'_id': 'beta', 'value': 2}]
