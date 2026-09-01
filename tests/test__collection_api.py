@@ -19,6 +19,7 @@ from unittest import TestCase
 from packaging import version
 
 import mongomock
+from mongomock import filtering
 from mongomock import helpers
 from tests.diff import diff
 
@@ -456,6 +457,17 @@ class CollectionAPITest(TestCase):
 
         self.assertEqual({'value': 42}, self.db.collection.find_one(filter_, projection))
         self.assertEqual({'_id': 0, 'value': 1}, dict(projection))
+
+    def test__find_one_id_lookup_preserves_operator_and_regex_queries(self):
+        self.db.collection.insert_many(
+            [{'_id': 'alpha', 'value': 1}, {'_id': 'beta', 'value': 2}]
+        )
+
+        self.assertEqual('alpha', self.db.collection.find_one({'_id': 'alpha'})['_id'])
+        self.assertIsNone(self.db.collection.find_one({'_id': 'missing'}))
+        self.assertEqual('beta', self.db.collection.find_one({'_id': {'$eq': 'beta'}})['_id'])
+        self.assertEqual('alpha', self.db.collection.find_one({'_id': {'$in': ['alpha']}})['_id'])
+        self.assertEqual('beta', self.db.collection.find_one({'_id': re.compile('^bet')})['_id'])
 
     def test__insert_one_type_error(self):
         with self.assertRaises(TypeError):
@@ -1663,6 +1675,15 @@ class CollectionAPITest(TestCase):
 
         self.assertEqual(self.db.collection.count_documents({}), 1)
 
+    def test__compound_unique_index_containing_id_accepts_repeated_values(self):
+        self.db.collection.create_index([('_id', 1), ('value', 1)], unique=True)
+
+        self.db.collection.insert_many(
+            [{'_id': 1, 'value': 'same'}, {'_id': 2, 'value': 'same'}]
+        )
+
+        self.assertEqual(2, self.db.collection.count_documents({}))
+
     def test__create_index_duplicate(self):
         self.db.collection.create_index([('value', 1)])
         self.db.collection.create_index([('value', 1)])
@@ -2414,6 +2435,79 @@ class CollectionAPITest(TestCase):
         self.db.collection.insert_one({'a': 'a'})
         with self.assertRaises(mongomock.OperationFailure):
             self.db.collection.find_one({'a': {'$in': 'not a list'}})
+
+    def test__in_query_handles_hashable_and_unhashable_values(self):
+        self.db.collection.insert_many(
+            [
+                {'_id': 'number', 'value': 999},
+                {'_id': 'missing'},
+                {'_id': 'mapping', 'value': {'nested': 1}},
+                {'_id': 'array', 'value': [{'nested': 2}, 1000]},
+                {'_id': 'regex', 'value': 'Alpha'},
+            ]
+        )
+
+        large_values = list(range(1000))
+        self.assertEqual(
+            {'number'},
+            {doc['_id'] for doc in self.db.collection.find({'value': {'$in': large_values}})},
+        )
+        self.assertEqual(
+            {'missing'},
+            {doc['_id'] for doc in self.db.collection.find({'value': {'$in': [None]}})},
+        )
+        self.assertEqual(
+            {'mapping'},
+            {
+                doc['_id']
+                for doc in self.db.collection.find({'value': {'$in': [{'nested': 1}]}})
+            },
+        )
+        self.assertEqual(
+            {'array'},
+            {doc['_id'] for doc in self.db.collection.find({'value': {'$in': [1000]}})},
+        )
+        self.assertEqual(
+            {'regex'},
+            {
+                doc['_id']
+                for doc in self.db.collection.find(
+                    {'value': {'$in': [re.compile('^alpha', re.IGNORECASE)]}}
+                )
+            },
+        )
+
+    def test__in_filter_does_not_cache_mutable_values_globally(self):
+        values = [1]
+        filter_ = {'value': {'$in': values}}
+
+        self.assertTrue(filtering.filter_applies(filter_, {'value': 1}))
+        values[:] = [2]
+        self.assertFalse(filtering.filter_applies(filter_, {'value': 1}))
+
+    def test__query_filterer_compiles_in_values_once(self):
+        class HashCounter:
+            def __init__(self, value):
+                self.value = value
+                self.calls = 0
+
+            def __hash__(self):
+                self.calls += 1
+                return hash(self.value)
+
+            def __eq__(self, other):
+                return self.value == other
+
+        operands = [HashCounter(1), HashCounter(2)]
+        applies_filter = filtering.make_filter_applier({'value': {'$in': operands}})
+
+        self.assertFalse(applies_filter({'value': 0}))
+        calls_after_compilation = [operand.calls for operand in operands]
+        matches = [value for value in range(1, 4) if applies_filter({'value': value})]
+
+        self.assertEqual([1, 2], matches)
+        self.assertTrue(all(calls_after_compilation))
+        self.assertEqual(calls_after_compilation, [operand.calls for operand in operands])
 
     def test__with_options(self):
         self.db.collection.with_options(read_preference=None)

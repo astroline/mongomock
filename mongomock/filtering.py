@@ -59,20 +59,28 @@ def filter_applies(search_filter, document, user_vars=None):
     return _filterer_inst.apply(search_filter, document, user_vars=user_vars)
 
 
+def make_filter_applier(search_filter, user_vars=None):
+    """Return a predicate that caches prepared $in operands for one query."""
+    filterer = _Filterer(enable_in_cache=True)
+    return lambda document: filterer.apply(search_filter, document, user_vars=user_vars)
+
+
 class _Filterer:
     """An object to help applying a filter, using the MongoDB query language."""
 
     # This is populated using register_parse_expression further down.
     parse_expression: ClassVar[list] = []
 
-    def __init__(self):
+    def __init__(self, enable_in_cache=False):
+        self._in_cache = {} if enable_in_cache else None
+        in_op = self._cached_in_op if enable_in_cache else _in_op
         self._operator_map = dict(
             {
                 '$eq': _list_expand(operator_eq),
                 '$ne': _list_expand(lambda dv, sv: not operator_eq(dv, sv), negative=True),
                 '$all': self._all_op,
-                '$in': _in_op,
-                '$nin': lambda dv, sv: not _in_op(dv, sv),
+                '$in': in_op,
+                '$nin': lambda dv, sv: not in_op(dv, sv),
                 '$exists': lambda dv, sv: bool(sv) == (dv is not NOTHING),
                 '$regex': _not_nothing_and(_regex),
                 '$elemMatch': self._elem_match_op,
@@ -112,19 +120,19 @@ class _Filterer:
                 raise OperationFailure('unknown top level operator: ' + key)
 
             is_match = False
-
-            is_checking_negative_match = isinstance(search, Mapping) and {'$ne', '$nin'} & set(
-                search.keys()
-            )
-            is_checking_positive_match = not isinstance(search, Mapping) or (
-                set(search.keys()) - {'$ne', '$nin'}
+            is_mapping = isinstance(search, Mapping)
+            search_keys = set(search) if is_mapping else set()
+            is_checking_negative_match = bool({'$ne', '$nin'} & search_keys)
+            is_checking_positive_match = not is_mapping or bool(search_keys - {'$ne', '$nin'})
+            is_ops_filter = bool(search) and is_mapping and all(
+                operator.startswith('$') for operator in search_keys
             )
             has_candidates = False
 
             if search == {'$exists': False} and not iter_key_candidates(key, document):
                 continue
 
-            if isinstance(search, Mapping) and '$all' in search:
+            if is_mapping and '$all' in search:
                 if not self._all_op(iter_key_candidates(key, document), search['$all']):
                     return False
                 # if there are no query operators then continue
@@ -133,11 +141,6 @@ class _Filterer:
 
             for doc_val in iter_key_candidates(key, document):
                 has_candidates |= doc_val is not NOTHING
-                is_ops_filter = (
-                    search
-                    and isinstance(search, Mapping)
-                    and all(key.startswith('$') for key in search)
-                )
                 if is_ops_filter:
                     if '$options' in search and '$regex' in search:
                         search = _combine_regex_options(search)
@@ -222,6 +225,53 @@ class _Filterer:
             else:
                 matches.append(x in dv)
         return all(matches)
+
+    def _cached_in_op(self, doc_val, search_val):
+        if not isinstance(search_val, (list, tuple)):
+            raise OperationFailure('$in needs an array')
+
+        cache_key = id(search_val)
+        prepared = self._in_cache.get(cache_key)
+        if prepared is None or prepared[0] is not search_val:
+            values = tuple(search_val)
+            is_regex = tuple(isinstance(value, _RE_TYPES) for value in values)
+            has_regex = any(is_regex)
+            compiled = None
+            if not has_regex:
+                try:
+                    compiled = frozenset(values)
+                except TypeError:
+                    compiled = None
+            prepared = (search_val, values, is_regex, has_regex, compiled, NOTHING)
+            self._in_cache[cache_key] = prepared
+
+        _, values, is_regex, has_regex, compiled, contains_none = prepared
+        if doc_val is NOTHING:
+            if contains_none is NOTHING:
+                contains_none = None in values
+                prepared = (search_val, values, is_regex, has_regex, compiled, contains_none)
+                self._in_cache[cache_key] = prepared
+            if contains_none:
+                return True
+
+        document_values = _force_list(doc_val)
+        if compiled is not None:
+            for value in document_values:
+                try:
+                    if value in compiled:
+                        return True
+                except TypeError:
+                    if value in values:
+                        return True
+            return False
+
+        if not has_regex:
+            return any(value in values for value in document_values)
+
+        return any(
+            (regex and _regex(document_values, value)) or value in document_values
+            for value, regex in zip(values, is_regex)
+        )
 
 
 def iter_key_candidates(key, doc):

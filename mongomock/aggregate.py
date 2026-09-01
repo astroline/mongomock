@@ -1670,12 +1670,11 @@ def _handle_facet_stage(in_collection, database, options, user_vars):
 
 def _handle_match_stage(in_collection, database, options, user_vars):
     spec = helpers.patch_datetime_awareness_in_document(options)
+    applies_filter = filtering.make_filter_applier(spec, user_vars=user_vars)
     return [
         doc
         for doc in in_collection
-        if filtering.filter_applies(
-            spec, helpers.patch_datetime_awareness_in_document(doc), user_vars=user_vars
-        )
+        if applies_filter(helpers.patch_datetime_awareness_in_document(doc))
     ]
 
 

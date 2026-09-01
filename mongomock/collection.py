@@ -656,6 +656,10 @@ class Collection:
             if not index.get('unique'):
                 continue
             unique = index.get('key')
+            if any(key == '_id' for key, _ in unique):
+                # The store already guarantees global _id uniqueness, so any
+                # unique index containing _id is necessarily unique.
+                continue
             is_sparse = index.get('sparse')
             partial_filter_expression = index.get('partialFilterExpression')
             find_kwargs = {}
@@ -668,7 +672,7 @@ class Collection:
                 continue
             if partial_filter_expression is not None:
                 find_kwargs = {'$and': [partial_filter_expression, find_kwargs]}
-            answer_count = len(list(self._iter_documents(find_kwargs)))
+            answer_count = sum(1 for _ in itertools.islice(self._iter_documents(find_kwargs), 2))
             if answer_count > 1:
                 raise DuplicateKeyError('E11000 Duplicate Key Error', 11000)
 
@@ -1535,8 +1539,36 @@ class Collection:
         if self._store.is_empty:
             filter_applies(filter, {})
 
+        # An exact _id value identifies at most one candidate. Operator
+        # expressions and regular expressions still need the normal matcher.
+        if isinstance(filter, Mapping) and len(filter) == 1 and '_id' in filter:
+            query_id = filter['_id']
+            is_operator_query = (
+                isinstance(query_id, Mapping)
+                and bool(query_id)
+                and all(isinstance(key, str) and key.startswith('$') for key in query_id)
+            )
+            if not is_operator_query and not isinstance(query_id, filtering._RE_TYPES):
+                try:
+                    if isinstance(query_id, Mapping):
+                        query_id = helpers.hashdict(query_id)
+                    document = self._store[query_id]
+                except KeyError:
+                    return iter(())
+                except TypeError:
+                    # An unhashable literal cannot use the store lookup. Keep
+                    # the matcher as the source of truth for unusual values.
+                    pass
+                else:
+                    if filter_applies(filter, document):
+                        return iter((document,))
+                    return iter(())
+
+        applies_filter = filtering.make_filter_applier(filter)
         return (
-            document for document in list(self._store.documents) if filter_applies(filter, document)
+            document
+            for document in list(self._store.documents)
+            if applies_filter(document)
         )
 
     def find_one(self, filter=None, *args, **kwargs):  # pylint: disable=keyword-arg-before-vararg
