@@ -134,6 +134,8 @@ class CollectionStore:
             yield from self._documents.values()
 
     def _remove_expired_documents(self):
+        if not self._ttl_indexes:
+            return
         for index in self._ttl_indexes.values():
             self._expire_documents(index)
 
