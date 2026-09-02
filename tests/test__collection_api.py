@@ -265,6 +265,15 @@ class CollectionAPITest(TestCase):
         refetched_obj = self.db.collection.find_one({'a': 1})
         self.assertNotEqual(fetched_obj, refetched_obj)
 
+    @skipIf(not helpers.HAVE_PYMONGO, 'pymongo not installed')
+    def test_cursor_returns_mutable_bson_leaf_copies(self):
+        self.db.collection.insert_one({'code': Code('return value', {'value': 1})})
+
+        fetched = self.db.collection.find_one()
+        fetched['code'].scope['value'] = 2
+
+        self.assertEqual({'value': 1}, self.db.collection.find_one()['code'].scope)
+
     def test_cursor_with_projection_returns_value_copies(self):
         self.db.collection.insert_one({'a': ['b']})
         fetched_list = self.db.collection.find_one(projection=['a'])['a']
@@ -272,6 +281,54 @@ class CollectionAPITest(TestCase):
         fetched_list.append('c')
         refetched_list = self.db.collection.find_one(projection=['a'])['a']
         self.assertEqual(refetched_list, ['b'])
+
+    def test_cursor_reads_consistent_snapshot_during_update(self):
+        self.db.collection.insert_one(
+            collections.OrderedDict(
+                [
+                    ('_id', 1),
+                    ('version', 0),
+                    ('gate', 'trigger-update'),
+                    ('nested', {'version': 0}),
+                ]
+            )
+        )
+        original_copy = helpers.copy_if_mutable
+        update_triggered = []
+
+        def copy_and_update(value):
+            if value == 'trigger-update' and not update_triggered:
+                update_triggered.append(True)
+                self.db.collection.update_one(
+                    {'_id': 1}, {'$set': {'version': 1, 'nested.version': 1}}
+                )
+            return original_copy(value)
+
+        with mock.patch.object(helpers, 'copy_if_mutable', side_effect=copy_and_update):
+            snapshot = self.db.collection.find_one({'_id': 1})
+
+        self.assertTrue(update_triggered)
+        self.assertEqual((0, 0), (snapshot['version'], snapshot['nested']['version']))
+        updated = self.db.collection.find_one({'_id': 1})
+        self.assertEqual((1, 1), (updated['version'], updated['nested']['version']))
+
+    def test_cursor_with_projection_copies_mapping_id(self):
+        self.db.collection.insert_one({'_id': {'tenant': 'one'}, 'value': 1})
+
+        projected = self.db.collection.find_one(projection={'value': 1})
+        projected['_id']['tenant'] = 'changed'
+
+        self.assertEqual('one', self.db.collection.find_one()['_id']['tenant'])
+
+    def test_cursor_with_projection_operator_returns_value_copies(self):
+        self.db.collection.insert_one({'items': [{'value': 1}]})
+
+        projected = self.db.collection.find_one(
+            projection={'items': {'$elemMatch': {'value': 1}}}
+        )
+        projected['items'][0]['value'] = 2
+
+        self.assertEqual(1, self.db.collection.find_one()['items'][0]['value'])
 
     @skipIf(version.parse('4.0') <= helpers.PYMONGO_VERSION, 'update was removed in pymongo v4')
     def test__update_retval(self):
@@ -398,6 +455,17 @@ class CollectionAPITest(TestCase):
         code = Code('return value', {'value': 1})
 
         result = self.db.collection.insert_one({'code': code})
+        code.scope['value'] = 2
+
+        stored = self.db.collection.find_one(result.inserted_id)
+        self.assertEqual({'value': 1}, stored['code'].scope)
+
+    @skipIf(not helpers.HAVE_PYMONGO, 'pymongo not installed')
+    def test__update_one_detaches_mutable_bson_leaf(self):
+        result = self.db.collection.insert_one({})
+        code = Code('return value', {'value': 1})
+
+        self.db.collection.update_one({'_id': result.inserted_id}, {'$set': {'code': code}})
         code.scope['value'] = 2
 
         stored = self.db.collection.find_one(result.inserted_id)
@@ -1947,6 +2015,23 @@ class CollectionAPITest(TestCase):
 
         self.assertEqual(self.db.collection.count_documents({}), 4)
 
+    def test__ensure_partial_unique_index_with_updates(self):
+        self.db.collection.create_index(
+            [('value', 1)],
+            unique=True,
+            partialFilterExpression={'active': True},
+        )
+        self.db.collection.insert_one({'_id': 1, 'value': 'same', 'active': False})
+        self.db.collection.insert_one({'_id': 2, 'value': 'same', 'active': True})
+
+        with self.assertRaises(mongomock.DuplicateKeyError):
+            self.db.collection.update_one({'_id': 1}, {'$set': {'active': True}})
+        self.assertFalse(self.db.collection.find_one({'_id': 1})['active'])
+
+        self.db.collection.update_one({'_id': 2}, {'$set': {'active': False}})
+        self.db.collection.update_one({'_id': 1}, {'$set': {'active': True}})
+        self.assertTrue(self.db.collection.find_one({'_id': 1})['active'])
+
     def test__ensure_uniq_idxs_without_ordering(self):
         self.db.collection.create_index([('value', 1)], unique=True)
 
@@ -1983,6 +2068,25 @@ class CollectionAPITest(TestCase):
 
         self.assertEqual(self.db.collection.count_documents({}), 4)
 
+    def test_sparse_unique_index_with_unhashable_value(self):
+        self.db.collection.create_index([('value', 1)], unique=True, sparse=True)
+
+        self.db.collection.insert_one({'value': ['first']})
+        self.db.collection.insert_one({'value': ['second']})
+
+        with self.assertRaises(mongomock.DuplicateKeyError):
+            self.db.collection.insert_one({'value': ['first']})
+
+        self.assertEqual(self.db.collection.count_documents({}), 2)
+
+    def test_unique_index_does_not_confuse_multikey_path_with_missing_value(self):
+        self.db.collection.create_index([('value.key', 1)], unique=True)
+
+        self.db.collection.insert_one({})
+        self.db.collection.insert_one({'value': [{'key': 1}]})
+
+        self.assertEqual(self.db.collection.count_documents({}), 2)
+
     def test_unique_index_with_upsert_insertion(self):
         self.db.collection.create_index([('value', 1)], unique=True)
 
@@ -2008,6 +2112,8 @@ class CollectionAPITest(TestCase):
 
         with self.assertRaises(mongomock.DuplicateKeyError):
             self.db.collection.replace_one({'value': 1}, {'value': 2})
+
+        self.assertEqual({'_id': 1, 'value': 1}, self.db.collection.find_one({'_id': 1}))
 
     def test_unique_index_with_update_on_nested_field(self):
         self.db.collection.create_index([('a.b', 1)], unique=True)

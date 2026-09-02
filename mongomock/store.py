@@ -1,6 +1,7 @@
 import collections
 import datetime
 import functools
+import threading
 
 import mongomock
 from mongomock.thread import RWLock
@@ -70,6 +71,10 @@ class CollectionStore:
         self.name = name
         self._ttl_indexes = {}
 
+        # Serialize logical writes while allowing readers to keep using stable
+        # document versions published by the collection.
+        self._write_lock = threading.RLock()
+
         # 694 - Lock for safely iterating and mutating OrderedDicts
         self._rwlock = RWLock()
 
@@ -81,10 +86,12 @@ class CollectionStore:
         return self._documents or self.indexes or self._is_force_created
 
     def drop(self):
-        self._documents = collections.OrderedDict()
-        self.indexes = {}
-        self._ttl_indexes = {}
-        self._is_force_created = False
+        with self._write_lock:
+            with self._rwlock.writer():
+                self._documents = collections.OrderedDict()
+                self.indexes = {}
+                self._ttl_indexes = {}
+                self._is_force_created = False
 
     def create_index(self, index_name, index_dict):
         self.indexes[index_name] = index_dict
@@ -136,8 +143,9 @@ class CollectionStore:
     def _remove_expired_documents(self):
         if not self._ttl_indexes:
             return
-        for index in self._ttl_indexes.values():
-            self._expire_documents(index)
+        with self._write_lock:
+            for index in self._ttl_indexes.values():
+                self._expire_documents(index)
 
     def _expire_documents(self, index):
         # TODO(juannyg): use a caching mechanism to avoid re-expiring the documents if

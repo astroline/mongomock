@@ -157,6 +157,15 @@ def validate_write_concern_params(**params):
         WriteConcern(**params)
 
 
+def _synchronize_writes(method):
+    @functools.wraps(method)
+    def synchronized(self, *args, **kwargs):
+        with self._store._write_lock:
+            return method(self, *args, **kwargs)
+
+    return synchronized
+
+
 class BulkWriteOperation:
     def __init__(self, builder, selector, is_upsert=False):
         self.builder = builder
@@ -303,7 +312,7 @@ def _copy_field(obj, container):
         for key, value in obj.items():
             new[key] = _copy_field(value, container)
         return new
-    return copy.copy(obj)
+    return helpers.copy_if_mutable(obj)
 
 
 def _recursive_key_check_null_character(data):
@@ -584,6 +593,7 @@ class Collection:
     def _store(self):
         return self._db_store[self._name]
 
+    @_synchronize_writes
     def _insert(self, data, session=None, ordered=True):
         if session:
             raise_not_implemented('session', 'Mongomock does not handle sessions yet')
@@ -641,17 +651,13 @@ class Collection:
         if object_id in self._store:
             raise DuplicateKeyError('E11000 Duplicate Key Error', 11000)
 
+        self._ensure_uniques(data)
         self._store[object_id] = data
-        try:
-            self._ensure_uniques(data)
-        except DuplicateKeyError:
-            # Rollback
-            del self._store[object_id]
-            raise
         return data['_id']
 
-    def _ensure_uniques(self, new_data):
-        # Note we consider new_data is already inserted in db
+    def _ensure_uniques(self, new_data, ignored_document=None):
+        # The candidate is not published yet. Updates ignore the stored version
+        # that the candidate will replace; inserts compare against every document.
         for index in self._store.indexes.values():
             if not index.get('unique'):
                 continue
@@ -668,12 +674,23 @@ class Collection:
                     find_kwargs[key] = helpers.get_value_by_dot(new_data, key)
                 except KeyError:
                     find_kwargs[key] = None
-            if is_sparse and set(find_kwargs.values()) == {None}:
+            if is_sparse and all(value is None for value in find_kwargs.values()):
                 continue
             if partial_filter_expression is not None:
+                if not filter_applies(partial_filter_expression, new_data):
+                    continue
                 find_kwargs = {'$and': [partial_filter_expression, find_kwargs]}
-            answer_count = sum(1 for _ in itertools.islice(self._iter_documents(find_kwargs), 2))
-            if answer_count > 1:
+            candidate_matches = filter_applies(find_kwargs, new_data)
+            existing_matches = (
+                document
+                for document in self._iter_documents(find_kwargs)
+                if document is not ignored_document
+            )
+            match_limit = 1 if candidate_matches else 2
+            existing_match_count = sum(
+                1 for _ in itertools.islice(existing_matches, match_limit)
+            )
+            if existing_match_count + int(candidate_matches) > 1:
                 raise DuplicateKeyError('E11000 Duplicate Key Error', 11000)
 
     def _internalize_dict(self, d):
@@ -783,6 +800,7 @@ class Collection:
             )
             return self._update(spec, document, upsert, manipulate, multi, check_keys, **kwargs)
 
+    @_synchronize_writes
     def _update(
         self,
         spec,
@@ -822,7 +840,7 @@ class Collection:
                 'yet',
             )
         spec = helpers.patch_datetime_awareness_in_document(spec)
-        document = helpers.patch_datetime_awareness_in_document(document)
+        document = helpers.patch_datetime_awareness_in_document(document, copy_values=True)
         validate_is_mapping('spec', spec)
         validate_list_or_mapping('document', document)
 
@@ -862,7 +880,8 @@ class Collection:
                 existing_document = to_insert
                 was_insert = True
             else:
-                original_document_snapshot = copy.deepcopy(existing_document)
+                original_document = existing_document
+                existing_document = copy.deepcopy(original_document)
                 updated_existing = True
             num_matched += 1
 
@@ -874,27 +893,25 @@ class Collection:
             if was_insert:
                 upserted_id = self._insert(existing_document)
                 num_updated += 1
-            elif existing_document != original_document_snapshot:
-                # Document has been modified in-place.
+            elif existing_document != original_document:
+                # The stored document remains unchanged until the candidate is
+                # fully validated and can be published in one operation.
 
-                # Make sure the ID was not change.
-                if original_document_snapshot.get('_id') != existing_document.get('_id'):
-                    # Rollback.
-                    self._store[original_document_snapshot['_id']] = original_document_snapshot
+                # Make sure the ID was not changed.
+                if original_document.get('_id') != existing_document.get('_id'):
                     raise WriteError(
                         "After applying the update, the (immutable) field '_id' was found to have "
                         'been altered to _id: {}'.format(existing_document.get('_id'))
                     )
 
-                # Make sure it still respect the unique indexes and, if not, to
-                # revert modifications
-                try:
-                    self._ensure_uniques(existing_document)
-                    num_updated += 1
-                except DuplicateKeyError:
-                    # Rollback.
-                    self._store[original_document_snapshot['_id']] = original_document_snapshot
-                    raise
+                # Validate before publication so readers never observe a
+                # candidate that violates a unique index.
+                self._ensure_uniques(existing_document, ignored_document=original_document)
+                object_id = original_document['_id']
+                if isinstance(object_id, Mapping):
+                    object_id = helpers.hashdict(object_id)
+                self._store[object_id] = existing_document
+                num_updated += 1
 
             if not multi:
                 break
@@ -1340,13 +1357,13 @@ class Collection:
 
         return result
 
-    def _apply_projection_operators(self, ops, doc, doc_copy):
+    def _apply_projection_operators(self, ops, doc, doc_copy, container):
         """Applies projection operators to copied document."""
         for field, op in ops.items():
             if field not in doc_copy:
                 if field in doc:
                     # field was not copied yet (since we are in include mode)
-                    doc_copy[field] = doc[field]
+                    doc_copy[field] = _copy_field(doc[field], container)
                 else:
                     # field doesn't exist in original document, no work to do
                     continue
@@ -1445,12 +1462,12 @@ class Collection:
         if id_value == 0:
             doc_copy.pop('_id', None)
         elif '_id' in doc:
-            doc_copy['_id'] = doc['_id']
+            doc_copy['_id'] = _copy_field(doc['_id'], container)
 
         fields['_id'] = id_value  # put _id back in fields
 
         # time to apply the projection operators and put back their fields
-        self._apply_projection_operators(projection_operators, doc, doc_copy)
+        self._apply_projection_operators(projection_operators, doc, doc_copy, container)
         for field, op in projection_operators.items():
             fields[field] = op
         return doc_copy
@@ -1646,6 +1663,7 @@ class Collection:
                 query or {}, update=update, upsert=upsert, sort=sort, projection=fields, **kwargs
             )
 
+    @_synchronize_writes
     def _find_and_modify(
         self,
         query,
@@ -1718,6 +1736,7 @@ class Collection:
             self._delete(filter, collation=collation, hint=hint, multi=True, session=session), True
         )
 
+    @_synchronize_writes
     def _delete(self, filter, collation=None, hint=None, multi=False, session=None):
         if hint:
             raise NotImplementedError(
@@ -1837,6 +1856,7 @@ class Collection:
         def ensure_index(self, key_or_list, cache_for=300, **kwargs):
             return self.create_index(key_or_list, cache_for, **kwargs)
 
+    @_synchronize_writes
     def create_index(self, keys, cache_for=300, session=None, **kwargs):
         if session:
             raise_not_implemented('session', 'Mongomock does not handle sessions yet')
@@ -1897,6 +1917,7 @@ class Collection:
 
         return index_name
 
+    @_synchronize_writes
     def create_indexes(self, indexes, session=None):
         for index in indexes:
             if not isinstance(index, IndexModel):
@@ -1914,6 +1935,7 @@ class Collection:
             for index in indexes
         ]
 
+    @_synchronize_writes
     def drop_index(self, index_or_name, session=None):
         if session:
             raise_not_implemented('session', 'Mongomock does not handle sessions yet')
@@ -1926,6 +1948,7 @@ class Collection:
         except KeyError as err:
             raise OperationFailure(f'index not found with name [{name}]') from err
 
+    @_synchronize_writes
     def drop_indexes(self, session=None):
         if session:
             raise_not_implemented('session', 'Mongomock does not handle sessions yet')

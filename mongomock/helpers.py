@@ -52,6 +52,7 @@ _IMMUTABLE_LEAF_TYPES = {
     bool,
     bytes,
     complex,
+    datetime,
     decimal.Decimal,
     float,
     int,
@@ -385,8 +386,16 @@ def patch_datetime_awareness_in_document(value, copy_values: bool = False):
         return value.replace(microsecond=mongo_us)
     if Timestamp and isinstance(value, Timestamp) and not value.time and not value.inc:
         return get_current_timestamp()
+    if not copy_values:
+        return value
+    return copy_if_mutable(value)
+
+
+def copy_if_mutable(value):
+    """Reuse exact immutable values and detach mutable or unknown leaf values."""
+
     # Use exact types: subclasses such as bson.Code can carry mutable state.
-    if not copy_values or type(value) in _IMMUTABLE_LEAF_TYPES:  # noqa: E721
+    if type(value) in _IMMUTABLE_LEAF_TYPES:  # noqa: E721
         return value
     return copy.deepcopy(value)
 
